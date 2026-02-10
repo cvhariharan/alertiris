@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"log"
 )
 
 type IRISClient struct {
@@ -106,7 +105,6 @@ func (c *IRISClient) DeleteAlert(alertID int, cid int) error {
 }
 
 func (c *IRISClient) do(method, path string, body []byte, cid int) (*IRISResponse, error) {
-	log.Printf("%s", body)
 	var reqBody io.Reader
 	if body != nil {
 		reqBody = bytes.NewReader(body)
@@ -121,8 +119,6 @@ func (c *IRISClient) do(method, path string, body []byte, cid int) (*IRISRespons
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	log.Printf("%+v", req)
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http %s %s: %w", method, path, err)
@@ -133,8 +129,6 @@ func (c *IRISClient) do(method, path string, body []byte, cid int) (*IRISRespons
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-
-	log.Printf("response: status=%d headers=%v body=%s", resp.StatusCode, resp.Header, string(respBody))
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("iris api %s %s returned %d: %s", method, path, resp.StatusCode, string(respBody))
