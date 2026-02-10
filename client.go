@@ -14,7 +14,6 @@ import (
 type IRISClient struct {
 	baseURL    string
 	apiKey     string
-	cid        int
 	httpClient *http.Client
 }
 
@@ -59,7 +58,7 @@ type IRISAlertData struct {
 	AlertID int `json:"alert_id"`
 }
 
-func NewIRISClient(cfg IRISConfig, customerID int) *IRISClient {
+func NewIRISClient(cfg IRISConfig) *IRISClient {
 	transport := &http.Transport{}
 	if cfg.SkipTLSVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -67,20 +66,19 @@ func NewIRISClient(cfg IRISConfig, customerID int) *IRISClient {
 	return &IRISClient{
 		baseURL: strings.TrimRight(cfg.URL, "/"),
 		apiKey:  cfg.APIKey,
-		cid:     customerID,
 		httpClient: &http.Client{
 			Transport: transport,
 		},
 	}
 }
 
-func (c *IRISClient) CreateAlert(req IRISAlertRequest) (int, error) {
+func (c *IRISClient) CreateAlert(req IRISAlertRequest, cid int) (int, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return 0, fmt.Errorf("marshal create request: %w", err)
 	}
 
-	resp, err := c.do(http.MethodPost, "/alerts/add", body)
+	resp, err := c.do(http.MethodPost, "/alerts/add", body, cid)
 	if err != nil {
 		return 0, err
 	}
@@ -92,29 +90,29 @@ func (c *IRISClient) CreateAlert(req IRISAlertRequest) (int, error) {
 	return data.AlertID, nil
 }
 
-func (c *IRISClient) UpdateAlert(alertID int, req IRISAlertUpdateRequest) error {
+func (c *IRISClient) UpdateAlert(alertID int, req IRISAlertUpdateRequest, cid int) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("marshal update request: %w", err)
 	}
 
-	_, err = c.do(http.MethodPost, fmt.Sprintf("/alerts/update/%d", alertID), body)
+	_, err = c.do(http.MethodPost, fmt.Sprintf("/alerts/update/%d", alertID), body, cid)
 	return err
 }
 
-func (c *IRISClient) DeleteAlert(alertID int) error {
-	_, err := c.do(http.MethodPost, fmt.Sprintf("/alerts/delete/%d", alertID), nil)
+func (c *IRISClient) DeleteAlert(alertID int, cid int) error {
+	_, err := c.do(http.MethodPost, fmt.Sprintf("/alerts/delete/%d", alertID), nil, cid)
 	return err
 }
 
-func (c *IRISClient) do(method, path string, body []byte) (*IRISResponse, error) {
+func (c *IRISClient) do(method, path string, body []byte, cid int) (*IRISResponse, error) {
 	log.Printf("%s", body)
 	var reqBody io.Reader
 	if body != nil {
 		reqBody = bytes.NewReader(body)
 	}
 
-	url := fmt.Sprintf("%s%s?cid=%d", c.baseURL, path, c.cid)
+	url := fmt.Sprintf("%s%s?cid=%d", c.baseURL, path, cid)
 	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

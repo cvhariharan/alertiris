@@ -41,6 +41,7 @@ type AlertConfig struct {
 	ResolvedAction   string         `koanf:"resolved_action"`
 	DefaultSeverityID int           `koanf:"default_severity_id"`
 	SeverityMap      map[string]int `koanf:"severity_map"`
+	GroupCustomerMap map[string]int `koanf:"group_customer_map"`
 }
 
 type Config struct {
@@ -53,7 +54,6 @@ type Config struct {
 func main() {
 	k := koanf.New(".")
 
-	// Defaults.
 	k.Load(confmap.Provider(map[string]any{
 		"server.listen":             ":8080",
 		"db.path":                   "./data/badger",
@@ -65,7 +65,6 @@ func main() {
 		"alerts.default_severity_id": 4,
 	}, "."), nil)
 
-	// TOML config file.
 	configPath := "config.toml"
 	if p := os.Getenv("ALERTIRIS_CONFIG"); p != "" {
 		configPath = p
@@ -74,7 +73,6 @@ func main() {
 		slog.Warn("could not load config file, using defaults", "path", configPath, "error", err)
 	}
 
-	// Env vars: ALERTIRIS_SERVER__LISTEN -> server.listen
 	k.Load(env.Provider("ALERTIRIS_", ".", func(s string) string {
 		return strings.Replace(
 			strings.ToLower(strings.TrimPrefix(s, "ALERTIRIS_")),
@@ -88,7 +86,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// BadgerDB.
 	opts := badger.DefaultOptions(cfg.DB.Path).WithLogger(nil)
 	db, err := badger.Open(opts)
 	if err != nil {
@@ -97,7 +94,7 @@ func main() {
 	}
 	defer db.Close()
 
-	irisClient := NewIRISClient(cfg.IRIS, cfg.Alerts.CustomerID)
+	irisClient := NewIRISClient(cfg.IRIS)
 	handler := NewHandler(irisClient, db, cfg.Alerts)
 
 	mux := http.NewServeMux()

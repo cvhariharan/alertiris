@@ -57,8 +57,17 @@ func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	customerID := h.config.CustomerID
+	if group := r.URL.Query().Get("group"); group != "" {
+		if id, ok := h.config.GroupCustomerMap[group]; ok {
+			customerID = id
+		} else {
+			slog.Warn("unknown group, using default customer", "group", group)
+		}
+	}
+
 	for _, alert := range payload.Alerts {
-		if err := h.processAlert(alert); err != nil {
+		if err := h.processAlert(alert, customerID); err != nil {
 			slog.Error("failed to process alert", "fingerprint", alert.Fingerprint, "error", err)
 		}
 	}
@@ -66,9 +75,9 @@ func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (h *Handler) processAlert(alert Alert) error {
+func (h *Handler) processAlert(alert Alert, customerID int) error {
 	fp := alert.Fingerprint
-	existingID, err := h.getAlertID(fp)
+	existingID, err := h.getAlertID(fp, customerID)
 	if err != nil && err != badger.ErrKeyNotFound {
 		return fmt.Errorf("db lookup: %w", err)
 	}
@@ -77,22 +86,22 @@ func (h *Handler) processAlert(alert Alert) error {
 	switch alert.Status {
 	case "firing":
 		if exists {
-			return h.updateAlert(existingID, alert)
+			return h.updateAlert(existingID, alert, customerID)
 		}
-		return h.createAlert(alert)
+		return h.createAlert(alert, customerID)
 	case "resolved":
 		if !exists {
 			slog.Warn("resolved alert not found in db, skipping", "fingerprint", fp)
 			return nil
 		}
-		return h.resolveAlert(existingID, alert)
+		return h.resolveAlert(existingID, alert, customerID)
 	default:
 		slog.Warn("unknown alert status", "status", alert.Status, "fingerprint", fp)
 		return nil
 	}
 }
 
-func (h *Handler) createAlert(alert Alert) error {
+func (h *Handler) createAlert(alert Alert, customerID int) error {
 	sourceContent, _ := json.Marshal(alert)
 
 	req := IRISAlertRequest{
@@ -105,16 +114,16 @@ func (h *Handler) createAlert(alert Alert) error {
 		SourceContent:    json.RawMessage(sourceContent),
 		SeverityID:       h.severityID(alert),
 		StatusID:         h.config.StatusIDNew,
-		CustomerID:       h.config.CustomerID,
+		CustomerID:       customerID,
 		Tags:             alert.Labels["alertname"],
 	}
 
-	alertID, err := h.iris.CreateAlert(req)
+	alertID, err := h.iris.CreateAlert(req, customerID)
 	if err != nil {
 		return fmt.Errorf("create iris alert: %w", err)
 	}
 
-	if err := h.storeAlertID(alert.Fingerprint, alertID); err != nil {
+	if err := h.storeAlertID(alert.Fingerprint, alertID, customerID); err != nil {
 		return fmt.Errorf("store alert mapping: %w", err)
 	}
 
@@ -122,7 +131,7 @@ func (h *Handler) createAlert(alert Alert) error {
 	return nil
 }
 
-func (h *Handler) updateAlert(alertID int, alert Alert) error {
+func (h *Handler) updateAlert(alertID int, alert Alert, customerID int) error {
 	sourceContent, _ := json.Marshal(alert)
 	desc := alertDescription(alert)
 	sevID := h.severityID(alert)
@@ -136,7 +145,7 @@ func (h *Handler) updateAlert(alertID int, alert Alert) error {
 		Tags:            &tags,
 	}
 
-	if err := h.iris.UpdateAlert(alertID, req); err != nil {
+	if err := h.iris.UpdateAlert(alertID, req, customerID); err != nil {
 		return fmt.Errorf("update iris alert %d: %w", alertID, err)
 	}
 
@@ -144,9 +153,9 @@ func (h *Handler) updateAlert(alertID int, alert Alert) error {
 	return nil
 }
 
-func (h *Handler) resolveAlert(alertID int, alert Alert) error {
+func (h *Handler) resolveAlert(alertID int, alert Alert, customerID int) error {
 	if h.config.ResolvedAction == "delete" {
-		if err := h.iris.DeleteAlert(alertID); err != nil {
+		if err := h.iris.DeleteAlert(alertID, customerID); err != nil {
 			return fmt.Errorf("delete iris alert %d: %w", alertID, err)
 		}
 		slog.Info("deleted iris alert", "fingerprint", alert.Fingerprint, "alert_id", alertID)
@@ -155,13 +164,13 @@ func (h *Handler) resolveAlert(alertID int, alert Alert) error {
 		req := IRISAlertUpdateRequest{
 			StatusID: &statusID,
 		}
-		if err := h.iris.UpdateAlert(alertID, req); err != nil {
+		if err := h.iris.UpdateAlert(alertID, req, customerID); err != nil {
 			return fmt.Errorf("resolve iris alert %d: %w", alertID, err)
 		}
 		slog.Info("resolved iris alert", "fingerprint", alert.Fingerprint, "alert_id", alertID)
 	}
 
-	if err := h.deleteAlertID(alert.Fingerprint); err != nil {
+	if err := h.deleteAlertID(alert.Fingerprint, customerID); err != nil {
 		return fmt.Errorf("delete alert mapping: %w", err)
 	}
 	return nil
@@ -176,10 +185,10 @@ func (h *Handler) severityID(alert Alert) int {
 	return h.config.DefaultSeverityID
 }
 
-func (h *Handler) getAlertID(fingerprint string) (int, error) {
+func (h *Handler) getAlertID(fingerprint string, customerID int) (int, error) {
 	var alertID int
 	err := h.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(dbKey(fingerprint))
+		item, err := txn.Get(dbKey(fingerprint, customerID))
 		if err != nil {
 			return err
 		}
@@ -195,20 +204,20 @@ func (h *Handler) getAlertID(fingerprint string) (int, error) {
 	return alertID, err
 }
 
-func (h *Handler) storeAlertID(fingerprint string, alertID int) error {
+func (h *Handler) storeAlertID(fingerprint string, alertID int, customerID int) error {
 	return h.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(dbKey(fingerprint), []byte(strconv.Itoa(alertID)))
+		return txn.Set(dbKey(fingerprint, customerID), []byte(strconv.Itoa(alertID)))
 	})
 }
 
-func (h *Handler) deleteAlertID(fingerprint string) error {
+func (h *Handler) deleteAlertID(fingerprint string, customerID int) error {
 	return h.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(dbKey(fingerprint))
+		return txn.Delete(dbKey(fingerprint, customerID))
 	})
 }
 
-func dbKey(fingerprint string) []byte {
-	return []byte("fp:" + fingerprint)
+func dbKey(fingerprint string, customerID int) []byte {
+	return []byte("fp:" + fingerprint + ":" + strconv.Itoa(customerID))
 }
 
 func alertDescription(alert Alert) string {
